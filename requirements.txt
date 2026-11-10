@@ -2,3 +2,7 @@ polars
 pandas
 matplotlib
 pyarrow
+numpy
+lightgbm
+scikit-learn
+holidays
