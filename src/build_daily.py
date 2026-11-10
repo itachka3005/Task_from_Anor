@@ -1,4 +1,9 @@
+"""
+Убираем дубли txn_id и тестовые операции (internal_test).
+Запуск: python src/build_daily.py
+"""
 from pathlib import Path
+
 import polars as pl
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -14,6 +19,8 @@ SCHEMA = {
     "amount_uzs": pl.Float64,
     "client_segment": pl.String,
 }
+
+KEYS = ["branch_id", "date", "channel", "txn_type", "client_segment"]
 
 
 def scan_raw() -> pl.LazyFrame:
@@ -42,21 +49,40 @@ def quality_report(raw: pl.LazyFrame) -> None:
     print(f"{'duplicate_txn_id':>22}: {rows - unique}")
 
 
-def build_daily(raw: pl.LazyFrame) -> pl.DataFrame:
+def aggregate(txns: pl.LazyFrame) -> pl.LazyFrame:
+    """Транзакции -> суммы и количество по (филиал, день, канал, тип, сегмент)."""
     return (
-        raw.group_by(
-            "branch_id",
-            pl.col("ts").dt.date().alias("date"),
-            "channel",
-            "txn_type",
-            "client_segment",
-        )
+        txns.with_columns(pl.col("ts").dt.date().alias("date"))
+        .group_by(KEYS)
         .agg(
             pl.col("amount_uzs").sum().alias("amount_uzs"),
             pl.len().alias("n_txn"),
         )
-        .sort("branch_id", "date", "channel", "txn_type", "client_segment")
+    )
+
+
+def build_daily(raw: pl.LazyFrame) -> pl.DataFrame:
+    # тестовые операции сотрудников банка - не клиентский спрос
+    raw = raw.filter(pl.col("client_segment") != "internal_test")
+
+    dup_ids = (
+        raw.group_by("txn_id").len().filter(pl.col("len") > 1).select("txn_id")
         .collect(engine="streaming")
+        .lazy()
+    )
+    singles = aggregate(raw.join(dup_ids, on="txn_id", how="anti")).collect(engine="streaming")
+
+    dups = (
+        raw.join(dup_ids, on="txn_id", how="semi").collect(engine="streaming")
+        .unique(subset="txn_id", keep="first")
+    )
+    deduped = aggregate(dups.lazy()).collect()
+
+    return (
+        pl.concat([singles, deduped])
+        .group_by(KEYS)
+        .agg(pl.col("amount_uzs").sum(), pl.col("n_txn").sum())
+        .sort(KEYS)
     )
 
 
@@ -73,6 +99,7 @@ def main() -> None:
         print(f"\n{col}:")
         print(daily.group_by(col).agg(pl.col("n_txn").sum()).sort("n_txn", descending=True))
     print(f"\nфилиалов: {daily['branch_id'].n_unique()}")
+    print(f"операций после чистки: {daily['n_txn'].sum()}")
 
 
 if __name__ == "__main__":
