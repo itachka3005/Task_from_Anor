@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 HORIZON = 30        #горизонт прогноза, дней
-LEVEL_WINDOW = 28   # кно для оценки уровня филиала, дней
+LEVEL_WINDOW = 28   #окно для оценки уровня филиала, дней
 
 #Малые праздники: один день, снятия падают примерно до 0,4 от нормы.
 #День независимости в данных длится два дня (1 и 2 сентября).
@@ -30,10 +30,11 @@ KIND = {"minor": 1, "navruz": 2, "fitr": 3, "adha": 4, "newyear": 5}
 PAYDAYS = {5: 1, 20: 2}  #число месяца -> вид выплаты (пик 5-го сильнее, чем 20-го)
 
 CATEGORICAL = ["branch_id", "region", "branch_type"]
+PLAN_FEATURE = "plan_ratio"
 FEATURES = CATEGORICAL + [
     "dow", "dom", "month", "days_to_month_end",
     "hol_kind", "hol_day", "pre_kind", "pre_days",
-    "payday_kind", "is_payday_nominal",
+    "payday_kind", "post_payday_kind", "is_payday_nominal",
     "plan_ratio", "wd_ratio", "log_level", "age_days",
 ]
 
@@ -130,6 +131,8 @@ def build_calendar(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         if shifted in cal.index:
             payday_kind[shifted] = kind
     cal["payday_kind"] = payday_kind
+    #день после выплаты: в данных снятия ещё на 10-15% выше нормы
+    cal["post_payday_kind"] = payday_kind.shift(1, fill_value=0).values
 
     #простые флаги для отчётов
     cal["is_holiday"] = (cal["hol_kind"] > 0).astype(int)

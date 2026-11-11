@@ -15,13 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 OUT_PATH = ROOT / "submission.csv"
 
-OBJECTIVE = "l2"  # выбирается по результатам validate.py
+#Вариант модели выбирается по результатам validate.py
+OBJECTIVE = "l2"
+LOG_TARGET = True
+USE_PLAN = False
 
-# Дни, про которые данные не дают однозначного ответа: {дата: вес сценария "праздник"}.
-# 11.05.2026 - официальный выходной (перенос с субботы 9 мая). В истории такой перенос
-# был один раз (10.03.2025) и снятия были обычными, но воскресенье 10.05.2026 уже
-# аномально низкое. Поэтому берём середину между двумя сценариями: так ошибка в этот
-# день ограничена половиной разницы, какой бы сценарий ни сбылся.
+#Дни, про которые данные не дают однозначного ответа: {дата: вес сценария "праздник"}.
+#11.05.2026 - официальный выходной (перенос с субботы 9 мая). В истории такой перенос
+#был один раз (10.03.2025) и снятия были обычными, но воскресенье 10.05.2026 уже
+#аномально низкое. Поэтому берём середину между двумя сценариями: так ошибка в этот
+#день ограничена половиной разницы, какой бы сценарий ни сбылся.
 UNCERTAIN_HOLIDAYS = {"2026-05-11": 0.5}
 
 
@@ -42,7 +45,7 @@ def main() -> None:
     df = make_features(panel)
     train, test = df[~df["is_forecast"]], df[df["is_forecast"]]
 
-    model = fit(train, OBJECTIVE)
+    model = fit(train, OBJECTIVE, LOG_TARGET, USE_PLAN)
     forecast = predict_with_scenarios(model, test, fallback=baseline_plan(train, test))
     result = pd.DataFrame({
         "branch_id": test["branch_id"].astype(str),
@@ -50,7 +53,7 @@ def main() -> None:
         "forecast_uzs": forecast.round().astype("int64"),
     })
 
-    # порядок строк и набор (филиал, дата) - строго как в шаблоне
+    #порядок строк и набор (филиал, дата) - строго как в шаблоне
     template = pd.read_csv(DATA_DIR / "submission_template.csv", parse_dates=["date"])
     submission = template[["branch_id", "date"]].merge(result, on=["branch_id", "date"], how="left")
 
@@ -61,7 +64,6 @@ def main() -> None:
     submission["date"] = submission["date"].dt.strftime("%Y-%m-%d")
     submission.to_csv(OUT_PATH, index=False)
 
-    # --- сводка, чтобы глазами проверить прогноз ---
     last30 = train[train["date"] > train["date"].max() - pd.Timedelta(days=30)]
     print(f"сохранено: {OUT_PATH}, строк: {len(submission)}")
     print(f"прогноз, всего: {forecast.sum() / 1e9:,.1f} млрд сум")

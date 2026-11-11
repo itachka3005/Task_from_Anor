@@ -3,22 +3,23 @@ from pathlib import Path
 import pandas as pd
 
 from features import make_features
-from model import make_lgbm
+from model import make_lgbm, make_xgb
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 HORIZON = 30   #дней прогноза, как в задаче
 LOOKBACK = 56  #дней истории для бейзлайнов (8 недель)
 
-# название окна -> последний день обучения
+#название окна -> последний день обучения
 FOLDS = {
-    "A: 11.04-10.05.2026": "2026-04-10",  # самое свежее окно
-    "B: 12.03-10.04.2026": "2026-03-11",  # внутри Рамазан хайит и Навруз
-    "C: 11.05-09.06.2025": "2025-05-10",  # те же даты год назад, внутри Курбан хайит
+    "A: 11.04-10.05.2026": "2026-04-10",  #самое свежее окно
+    "B: 12.03-10.04.2026": "2026-03-11",  #внутри Рамазан хайит и Навруз
+    "C: 11.05-09.06.2025": "2025-05-10",  #те же даты год назад, внутри Курбан хайит
 }
 
 
 def wape(y_true: pd.Series, y_pred: pd.Series) -> float:
+    """Метрика из задания: сумма модулей ошибок / сумма факта."""
     return (y_true - y_pred).abs().sum() / y_true.sum()
 
 
@@ -78,12 +79,26 @@ BASELINES = {
 }
 
 
-def evaluate(df: pd.DataFrame, models: dict) -> pd.DataFrame:
-    """WAPE каждой модели на каждом окне. Строки - модели, столбцы - окна."""
-    scores = {}
+def run_folds(df: pd.DataFrame, models: dict) -> pd.DataFrame:
+    """Прогнозы всех моделей на всех окнах: строки теста + столбец на каждую модель.
+    Каждая модель обучается на каждом окне один раз."""
+    parts = []
     for fold_name, cutoff in FOLDS.items():
         train, test = split(df, cutoff)
-        scores[fold_name] = {name: wape(test["y"], fn(train, test)) for name, fn in models.items()}
+        part = test[["branch_id", "date", "y", "is_holiday", "is_pre_holiday", "is_payday"]].copy()
+        part.insert(0, "fold", fold_name)
+        for name, fn in models.items():
+            part[name] = fn(train, test)
+        parts.append(part)
+    return pd.concat(parts, ignore_index=True)
+
+
+def evaluate(preds: pd.DataFrame, models: dict) -> pd.DataFrame:
+    """WAPE каждой модели на каждом окне. Строки - модели, столбцы - окна."""
+    scores = {
+        fold: {name: wape(part["y"], part[name]) for name in models}
+        for fold, part in preds.groupby("fold", sort=False)
+    }
     table = pd.DataFrame(scores)
     table["среднее"] = table.mean(axis=1)
     return table
@@ -91,8 +106,12 @@ def evaluate(df: pd.DataFrame, models: dict) -> pd.DataFrame:
 
 MODELS = {
     **BASELINES,
-    "LightGBM (l1)": make_lgbm("l1"),
-    "LightGBM (l2)": make_lgbm("l2"),
+    "LGBM l1, план как в истории": make_lgbm("l1"),
+    "LGBM l1, план-шаблон в тесте": make_lgbm("l1", template_plan=True),
+    "LGBM l1, без плана": make_lgbm("l1", use_plan=False),
+    "LGBM лог-доля, без плана": make_lgbm("l2", log_target=True, use_plan=False),
+    "LGBM лог-доля, план-шаблон": make_lgbm("l2", log_target=True, template_plan=True),
+    "XGBoost лог-доля, без плана": make_xgb(),
 }
 
 
@@ -105,19 +124,12 @@ def day_type(df: pd.DataFrame) -> pd.Series:
     return kind
 
 
-def errors_by_day_type(df: pd.DataFrame, models: dict) -> pd.DataFrame:
+def errors_by_day_type(preds: pd.DataFrame, models: dict) -> pd.DataFrame:
     """WAPE по типам дней, все окна вместе."""
-    parts = []
-    for cutoff in FOLDS.values():
-        train, test = split(df, cutoff)
-        part = pd.DataFrame({"y": test["y"], "kind": day_type(test)})
-        for name, fn in models.items():
-            part[name] = (test["y"] - fn(train, test)).abs()
-        parts.append(part)
-    allp = pd.concat(parts)
-    grouped = allp.groupby("kind")
-    table = grouped[list(models)].sum().div(grouped["y"].sum(), axis=0)
-    table["доля в сумме снятий"] = grouped["y"].sum() / allp["y"].sum()
+    kind = day_type(preds)
+    abs_err = preds[list(models)].sub(preds["y"], axis=0).abs()
+    table = abs_err.groupby(kind).sum().div(preds["y"].groupby(kind).sum(), axis=0)
+    table["доля в сумме снятий"] = preds["y"].groupby(kind).sum() / preds["y"].sum()
     return table
 
 
@@ -128,12 +140,12 @@ def main() -> None:
         print(f"{fold_name}: обучение до {cutoff}, тест {len(test)} строк, "
               f"{test['branch_id'].nunique()} филиалов")
 
-    table = evaluate(df, MODELS)
+    preds = run_folds(df, MODELS)
     print("\nWAPE, %")
-    print((table * 100).round(2).to_string())
+    print((evaluate(preds, MODELS) * 100).round(2).to_string())
 
     print("\nWAPE по типам дней, все окна вместе, %")
-    print((errors_by_day_type(df, MODELS) * 100).round(1).T.to_string())
+    print((errors_by_day_type(preds, MODELS) * 100).round(1).T.to_string())
 
 
 if __name__ == "__main__":

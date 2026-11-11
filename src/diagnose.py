@@ -45,7 +45,7 @@ def calendar_check(df: pd.DataFrame) -> pd.DataFrame:
 
 def fold_errors(df: pd.DataFrame) -> pd.DataFrame:
     """По каждому дню окон валидации: факт, прогноз, сумма модулей ошибок по филиалам."""
-    fit_predict = make_lgbm(OBJECTIVE)
+    fit_predict = make_lgbm("l2", log_target=True, use_plan=False)
     parts = []
     for fold_name, cutoff in FOLDS.items():
         train, test = split(df, cutoff)
