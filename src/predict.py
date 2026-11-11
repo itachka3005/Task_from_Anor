@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from features import make_features
+from features import KIND, make_features
 from model import fit, predict
 from validate import baseline_plan
 
@@ -15,7 +15,26 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 OUT_PATH = ROOT / "submission.csv"
 
-OBJECTIVE = "l1"  # выбирается по результатам validate.py
+OBJECTIVE = "l2"  # выбирается по результатам validate.py
+
+# Дни, про которые данные не дают однозначного ответа: {дата: вес сценария "праздник"}.
+# 11.05.2026 - официальный выходной (перенос с субботы 9 мая). В истории такой перенос
+# был один раз (10.03.2025) и снятия были обычными, но воскресенье 10.05.2026 уже
+# аномально низкое. Поэтому берём середину между двумя сценариями: так ошибка в этот
+# день ограничена половиной разницы, какой бы сценарий ни сбылся.
+UNCERTAIN_HOLIDAYS = {"2026-05-11": 0.5}
+
+
+def predict_with_scenarios(model, test: pd.DataFrame, fallback: pd.Series) -> pd.Series:
+    """Прогноз модели; для спорных дней - взвешенное среднее сценариев "обычный день" и "праздник"."""
+    forecast = predict(model, test, fallback)
+    for day, weight in UNCERTAIN_HOLIDAYS.items():
+        mask = test["date"] == pd.Timestamp(day)
+        as_holiday = test[mask].copy()
+        as_holiday["hol_kind"], as_holiday["hol_day"] = KIND["minor"], 1
+        holiday_forecast = predict(model, as_holiday, fallback[mask])
+        forecast[mask] = (1 - weight) * forecast[mask] + weight * holiday_forecast
+    return forecast
 
 
 def main() -> None:
@@ -24,7 +43,7 @@ def main() -> None:
     train, test = df[~df["is_forecast"]], df[df["is_forecast"]]
 
     model = fit(train, OBJECTIVE)
-    forecast = predict(model, test, fallback=baseline_plan(train, test))
+    forecast = predict_with_scenarios(model, test, fallback=baseline_plan(train, test))
     result = pd.DataFrame({
         "branch_id": test["branch_id"].astype(str),
         "date": test["date"],
@@ -51,9 +70,10 @@ def main() -> None:
 
     by_day = pd.DataFrame({
         "date": test["date"], "прогноз": forecast / 1e9, "план": test["planned_cash_load_uzs"] / 1e9,
-        "праздник": test["is_off"], "канун": test["is_pre_off"], "зарплата": test["is_payday"],
-    }).groupby("date").agg({"прогноз": "sum", "план": "sum", "праздник": "max", "канун": "max", "зарплата": "max"})
+        "праздник": test["hol_kind"], "разгон": test["pre_days"], "зарплата": test["payday_kind"],
+    }).groupby("date").agg({"прогноз": "sum", "план": "sum", "праздник": "max", "разгон": "max", "зарплата": "max"})
     by_day.insert(0, "день", by_day.index.day_name().str[:3])
+    by_day["спорный"] = by_day.index.strftime("%Y-%m-%d").isin(UNCERTAIN_HOLIDAYS).astype(int)
     print("\nПо дням, млрд сум:")
     print(by_day.round(1).to_string())
 
